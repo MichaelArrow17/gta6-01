@@ -1,148 +1,213 @@
-// The player: Rae Calloway on foot and behind the wheel. On foot Rae walks
-// and runs relative to the camera, punches with F and shoots with a click.
-// In a car W/S is throttle and brake, A/D steers, and the car takes damage
-// from hard hits. E steals the nearest car or steps out of the one Rae drives.
+// Solmar Bay — Rae Calloway: on-foot movement, driving, carjacking (E),
+// punch and pistol, and collision with the city's buildings.
+
 import * as THREE from 'three';
-import { CAR, PLAYER } from './config.js';
-import { createPedestrianMesh } from './people.js';
+import { CITY, TUNING } from './config.js';
+import { makePersonMesh } from './people.js';
 
-export function createPlayer(scene) {
-  const mesh = createPedestrianMesh(0x2a7ad9, 0x2a2f36);
-  // Rae's look: a sunset-orange jacket so the player reads at a distance.
-  mesh.children[0].material = new THREE.MeshLambertMaterial({ color: 0xe8823d });
+function hitSolid(solids, x, z, r) {
+  for (const s of solids) {
+    if (x + r > s.x0 && x - r < s.x1 && z + r > s.z0 && z - r < s.z1) return s;
+  }
+  return null;
+}
+
+function pushOut(solids, pos, r) {
+  const s = hitSolid(solids, pos.x, pos.z, r);
+  if (!s) return;
+  const dxl = pos.x + r - s.x0;
+  const dxr = s.x1 - (pos.x - r);
+  const dzl = pos.z + r - s.z0;
+  const dzr = s.z1 - (pos.z - r);
+  const m = Math.min(dxl, dxr, dzl, dzr);
+  if (m === dxl) pos.x = s.x0 - r;
+  else if (m === dxr) pos.x = s.x1 + r;
+  else if (m === dzl) pos.z = s.z0 - r;
+  else pos.z = s.z1 + r;
+}
+
+export function createPlayer(scene, rng, solids) {
+  const mesh = makePersonMesh(rng);
+  mesh.position.set(CITY.spawn.x, 0, CITY.spawn.z);
+  mesh.rotation.y = CITY.spawn.yaw;
   scene.add(mesh);
-  return {
+
+  const player = {
     mesh,
-    x: 0, z: 8, heading: 0, time: 0,
-    health: PLAYER.health,
-    inCar: null,       // the car object Rae drives, or null
-    speed: 0,          // car speed when driving
-    ammo: 12,
-    punchTimer: 0,
-    shootTimer: 0,
-    walkPhase: 0,
+    x: CITY.spawn.x,
+    z: CITY.spawn.z,
+    yaw: CITY.spawn.yaw,
+    health: TUNING.startHealth,
+    cash: TUNING.startCash,
+    ammo: TUNING.startAmmo,
+    inCar: null,
+    carSpeed: 0,
+    carYaw: 0,
+    speedKmh: 0,
+    nearCrate: false,
+    get pos() {
+      return { x: this.x, z: this.z };
+    },
+    respawn() {
+      this.x = CITY.spawn.x;
+      this.z = CITY.spawn.z;
+      this.yaw = CITY.spawn.yaw;
+      this.health = TUNING.startHealth;
+      if (this.inCar) {
+        this.inCar.mesh.visible = true;
+        this.inCar = null;
+      }
+      this.carSpeed = 0;
+      mesh.position.set(this.x, 0, this.z);
+      mesh.rotation.y = this.yaw;
+      mesh.visible = true;
+    },
+    damage(amount, fromX, fromZ) {
+      this.health -= amount;
+      if (this.health < 0) this.health = 0;
+    },
+    update(dt, input, world) {
+      if (this.inCar) {
+        this.updateCar(dt, input, world);
+      } else {
+        this.updateFoot(dt, input, world);
+      }
+      this.speedKmh = Math.round(Math.abs(this.carSpeed || this.walkSpeed || 0) * 3.6);
+    },
+    updateFoot(dt, input, world) {
+      const run = input.keys.has('ShiftLeft') || input.keys.has('ShiftRight');
+      const speed = run ? TUNING.runSpeed : TUNING.walkSpeed;
+      let fx = 0;
+      let fz = 0;
+      if (input.keys.has('KeyW')) fz -= 1;
+      if (input.keys.has('KeyS')) fz += 1;
+      if (input.keys.has('KeyA')) fx -= 1;
+      if (input.keys.has('KeyD')) fx += 1;
+      if (fx !== 0 || fz !== 0) {
+        // Camera-relative movement: W walks away from the camera.
+        // Local (nx, nz) rotates by (cameraYaw + PI) into world space.
+        const cy = world.cameraYaw;
+        const len = Math.hypot(fx, fz);
+        const nx = fx / len;
+        const nz = fz / len;
+        const wx = -nx * Math.cos(cy) - nz * Math.sin(cy);
+        const wz = nx * Math.sin(cy) - nz * Math.cos(cy);
+        this.x += wx * speed * dt;
+        this.z += wz * speed * dt;
+        this.yaw = Math.atan2(wx, wz);
+        pushOut(solids, this, 0.5);
+        this.walkSpeed = speed;
+      } else {
+        this.walkSpeed = 0;
+      }
+      mesh.position.set(this.x, 0, this.z);
+      mesh.rotation.y = this.yaw;
+      // Walk bob, driven by accumulated simulation time (never wall time,
+      // so staged re-renders stay pixel-identical).
+      this.bobT = (this.bobT || 0) + dt;
+      mesh.position.y = this.walkSpeed > 0 ? Math.abs(Math.sin(this.bobT * 11)) * 0.06 : 0;
+    },
+    updateCar(dt, input, world) {
+      const car = this.inCar;
+      let throttle = 0;
+      if (input.keys.has('KeyW')) throttle += 1;
+      if (input.keys.has('KeyS')) throttle -= 1;
+      if (throttle > 0) {
+        this.carSpeed += TUNING.carAccel * dt;
+      } else if (throttle < 0) {
+        if (this.carSpeed > 0.5) this.carSpeed -= TUNING.carBrake * dt;
+        else this.carSpeed -= TUNING.carReverse * dt * 0.5;
+      } else {
+        this.carSpeed *= Math.max(0, 1 - dt * 0.8);
+      }
+      this.carSpeed = THREE.MathUtils.clamp(this.carSpeed, -TUNING.carReverse, TUNING.carMaxSpeed);
+      let steer = 0;
+      if (input.keys.has('KeyA')) steer += 1;
+      if (input.keys.has('KeyD')) steer -= 1;
+      const dir = this.carSpeed >= 0 ? 1 : -1;
+      this.carYaw += steer * TUNING.carTurn * dt * dir * Math.min(1, Math.abs(this.carSpeed) / 8);
+      const nx = this.x + Math.sin(this.carYaw) * this.carSpeed * dt;
+      const nz = this.z + Math.cos(this.carYaw) * this.carSpeed * dt;
+      const probe = { x: nx, z: nz };
+      if (!hitSolid(solids, nx, nz, 1.4)) {
+        this.x = nx;
+        this.z = nz;
+      } else {
+        this.carSpeed *= 0.4;
+      }
+      this.x = THREE.MathUtils.clamp(this.x, -270, 270);
+      this.z = THREE.MathUtils.clamp(this.z, -270, 300);
+      car.mesh.position.set(this.x, 0, this.z);
+      car.mesh.rotation.y = this.carYaw;
+      mesh.visible = false;
+      this.walkSpeed = this.carSpeed;
+    },
+    // Steal or enter a car. The steal flag is captured BEFORE the car is
+    // entered, so pressing E at spawn enters the car and the job advances.
+    tryEnterCar(nearby) {
+      if (!nearby) return 'none';
+      const stolen = !nearby.owned;
+      if (stolen) {
+        nearby.taken = true;
+        nearby.owned = true;
+      }
+      this.inCar = nearby;
+      this.carYaw = nearby.yaw;
+      this.carSpeed = 0;
+      this.x = nearby.x;
+      this.z = nearby.z;
+      nearby.mesh.position.set(this.x, 0, this.z);
+      nearby.mesh.rotation.y = this.carYaw;
+      this.yaw = this.carYaw;
+      return stolen ? 'stolen' : 'entered';
+    },
+    exitCar() {
+      if (!this.inCar) return;
+      const car = this.inCar;
+      this.inCar = null;
+      this.carSpeed = 0;
+      this.x = car.x + Math.sin(this.yaw + Math.PI / 2) * 2.4;
+      this.z = car.z + Math.cos(this.yaw + Math.PI / 2) * 2.4;
+      mesh.position.set(this.x, 0, this.z);
+      mesh.visible = true;
+    },
+    punch(peds, police) {
+      const fx = Math.sin(this.yaw);
+      const fz = Math.cos(this.yaw);
+      for (const ped of peds) {
+        const dx = ped.x - this.x;
+        const dz = ped.z - this.z;
+        if (Math.hypot(dx, dz) < TUNING.punchRange && dx * fx + dz * fz > 0) {
+          ped.health -= 60;
+          return 'hit-ped';
+        }
+      }
+      return 'miss';
+    },
+    shoot(peds, police) {
+      if (this.ammo <= 0) return 'no-ammo';
+      this.ammo--;
+      const fx = Math.sin(this.yaw);
+      const fz = Math.cos(this.yaw);
+      for (const ped of peds) {
+        const dx = ped.x - this.x;
+        const dz = ped.z - this.z;
+        const dist = Math.hypot(dx, dz);
+        if (dist < TUNING.shotRange && dx * fx + dz * fz > dist * 0.9) {
+          ped.health -= 100;
+          return 'hit-ped';
+        }
+      }
+      for (const cop of police.cops) {
+        const dx = cop.x - this.x;
+        const dz = cop.z - this.z;
+        const dist = Math.hypot(dx, dz);
+        if (dist < TUNING.shotRange && dx * fx + dz * fz > dist * 0.9) {
+          return 'hit-cop';
+        }
+      }
+      return 'shot';
+    },
   };
-}
-
-export function collideCircle(colliders, x, z, radius) {
-  let nx = x;
-  let nz = z;
-  for (const c of colliders) {
-    const dx = nx - c.x;
-    const dz = nz - c.z;
-    const px = c.hx + radius - Math.abs(dx);
-    const pz = c.hz + radius - Math.abs(dz);
-    if (px > 0 && pz > 0) {
-      if (px < pz) nx = c.x + Math.sign(dx || 1) * (c.hx + radius);
-      else nz = c.z + Math.sign(dz || 1) * (c.hz + radius);
-    }
-  }
-  return [nx, nz];
-}
-
-export function stepOnFoot(player, dt, input, cameraYaw, colliders) {
-  const run = input.run ? PLAYER.runSpeed : PLAYER.walkSpeed;
-  // WASD moves relative to the camera: W is away from the camera.
-  const forward = { x: -Math.sin(cameraYaw), z: -Math.cos(cameraYaw) };
-  const right = { x: -forward.z, z: forward.x };
-  let mx = forward.x * input.forward + right.x * input.strafe;
-  let mz = forward.z * input.forward + right.z * input.strafe;
-  const len = Math.hypot(mx, mz);
-  if (len > 0.01) {
-    mx /= len;
-    mz /= len;
-    player.heading = Math.atan2(mx, mz);
-    const nx = player.x + mx * run * dt;
-    const nz = player.z + mz * run * dt;
-    const [cx, cz] = collideCircle(colliders, nx, nz, PLAYER.radius);
-    player.x = Math.max(-126, Math.min(126, cx));
-    player.z = Math.max(-126, Math.min(126, cz));
-    player.walkPhase += dt * (input.run ? 12 : 8);
-    const swing = Math.sin(player.walkPhase) * 0.5;
-    player.mesh.userData.legs[0].rotation.x = swing;
-    player.mesh.userData.legs[1].rotation.x = -swing;
-  } else {
-    player.mesh.userData.legs[0].rotation.x = 0;
-    player.mesh.userData.legs[1].rotation.x = 0;
-  }
-  player.mesh.position.set(player.x, 0, player.z);
-  player.mesh.rotation.y = player.heading;
-  if (player.punchTimer > 0) player.punchTimer -= dt;
-  if (player.shootTimer > 0) player.shootTimer -= dt;
-}
-
-export function stepDriving(player, dt, input, colliders) {
-  const car = player.inCar;
-  if (!car) return;
-  const throttle = input.forward;
-  const braking = input.forward < 0;
-  if (throttle > 0) player.speed += CAR.accel * dt;
-  else if (braking) {
-    if (player.speed > 0.5) player.speed -= CAR.brake * dt;
-    else player.speed -= CAR.accel * 0.5 * dt;
-  } else {
-    // Coast down.
-    player.speed -= Math.sign(player.speed) * CAR.grip * dt * 0.5;
-    if (Math.abs(player.speed) < 0.4) player.speed = 0;
-  }
-  player.speed = Math.max(-CAR.maxReverse, Math.min(CAR.maxSpeed, player.speed));
-  const steerInput = input.strafe;
-  const steerAmount = CAR.steer * steerInput * Math.min(1, Math.abs(player.speed) / 8);
-  car.heading += steerAmount * dt * Math.sign(player.speed || 1) * (player.speed < 0 ? -1 : 1);
-  const nx = car.x + Math.sin(car.heading) * player.speed * dt;
-  const nz = car.z + Math.cos(car.heading) * player.speed * dt;
-  const [cx, cz] = collideCircle(colliders, nx, nz, CAR.radius);
-  const hitWall = cx !== nx || cz !== nz;
-  if (hitWall && Math.abs(player.speed) > 6) {
-    car.health -= Math.abs(player.speed) * 0.8;
-    player.speed *= -0.25;
-  } else if (hitWall) {
-    player.speed *= 0.4;
-  }
-  car.x = Math.max(-126, Math.min(126, cx));
-  car.z = Math.max(-126, Math.min(126, cz));
-  car.mesh.position.set(car.x, 0, car.z);
-  car.mesh.rotation.y = car.heading;
-  for (const wheel of car.mesh.userData.wheels) wheel.rotation.x += (player.speed * dt) / 0.42;
-  player.x = car.x;
-  player.z = car.z;
-  player.heading = car.heading;
-  player.mesh.visible = false;
-}
-
-// Nearest stealable car within reach (parked cars, or slow traffic).
-// Wrecked cars (health 0) are skipped: stealing one used to put Rae in
-// and instantly throw her back out with a "car wrecked" toast, which read
-// as E doing nothing.
-export function nearestCar(player, cars, maxDist) {
-  let best = null;
-  let bestDist = maxDist;
-  for (const car of cars) {
-    if (car.health <= 0) continue;
-    const d = Math.hypot(car.x - player.x, car.z - player.z);
-    if (d < bestDist) {
-      bestDist = d;
-      best = car;
-    }
-  }
-  return best;
-}
-
-export function enterCar(player, car) {
-  player.inCar = car;
-  car.parked = false;
-  car.speed = 0;
-  player.speed = 0;
-  player.mesh.visible = false;
-}
-
-export function exitCar(player) {
-  const car = player.inCar;
-  if (!car) return;
-  player.inCar = null;
-  player.speed = 0;
-  player.x = car.x + Math.sin(car.heading + Math.PI / 2) * 2.4;
-  player.z = car.z + Math.cos(car.heading + Math.PI / 2) * 2.4;
-  player.mesh.visible = true;
-  player.mesh.position.set(player.x, 0, player.z);
+  return player;
 }

@@ -1,164 +1,173 @@
-// Missions and story: six jobs from Dario Venn and Lena Cross, each a short
-// chain of objectives — steal, drive to a marker, collect, survive the heat.
-// The module owns the objective list, the timer, the beacon in the world and
-// the payout; the world only feeds it the player's position and flags.
-import * as THREE from 'three';
-import { MISSIONS } from './config.js';
+// Solmar Bay — the six-job story chain for Dario Venn and Lena Cross.
+// Each job is a list of steps; a step completes when the player reaches its
+// target, enters a car, waits out a timer, or collects the golden crate.
 
-export function createMissions(scene) {
-  // The beacon: a glowing pillar the player drives toward, plus a ring on the ground.
-  const beacon = new THREE.Group();
-  const pillar = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.2, 1.2, 60, 12, 1, true),
-    new THREE.MeshBasicMaterial({ color: 0xf2c94c, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false }),
+import * as THREE from 'three';
+import { MISSIONS, PALETTE } from './config.js';
+
+function makeBeacon() {
+  const group = new THREE.Group();
+  const beam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.9, 1.6, 26, 12, 1, true),
+    new THREE.MeshBasicMaterial({ color: PALETTE.beacon, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false }),
   );
-  pillar.position.y = 30;
-  beacon.add(pillar);
+  beam.position.y = 13;
+  group.add(beam);
   const ring = new THREE.Mesh(
-    new THREE.RingGeometry(3.4, 4.4, 32),
-    new THREE.MeshBasicMaterial({ color: 0xf2c94c, transparent: true, opacity: 0.85, side: THREE.DoubleSide }),
+    new THREE.RingGeometry(2.4, 3.4, 24),
+    new THREE.MeshBasicMaterial({ color: PALETTE.marker, side: THREE.DoubleSide, transparent: true, opacity: 0.85 }),
   );
   ring.rotation.x = -Math.PI / 2;
   ring.position.y = 0.15;
-  beacon.add(ring);
+  group.add(ring);
+  return group;
+}
+
+function makeGoldenCrate() {
+  const group = new THREE.Group();
+  const crate = new THREE.Mesh(
+    new THREE.BoxGeometry(1.6, 1.6, 1.6),
+    new THREE.MeshLambertMaterial({ color: PALETTE.crateGold, emissive: 0x604000 }),
+  );
+  crate.position.y = 0.8;
+  group.add(crate);
+  const lid = new THREE.Mesh(
+    new THREE.BoxGeometry(1.7, 0.15, 1.7),
+    new THREE.MeshLambertMaterial({ color: 0x8a6420 }),
+  );
+  lid.position.y = 1.65;
+  group.add(lid);
+  group.userData.spin = crate;
+  return group;
+}
+
+export function createMissions(scene) {
+  const beacon = makeBeacon();
   beacon.visible = false;
   scene.add(beacon);
+  const crate = makeGoldenCrate();
+  crate.visible = false;
+  scene.add(crate);
 
-  // Crate pickups for the collect objectives.
-  const crateGeo = new THREE.BoxGeometry(1.6, 1.6, 1.6);
-  const crateMat = new THREE.MeshLambertMaterial({ color: 0xf2c94c, emissive: 0x664411 });
-  const crateMeshes = [];
-
-  let index = 0;          // which mission is active
-  let objective = 0;      // which objective of it
-  let timer = 0;          // seconds left on a timed objective (0 = none)
-  let active = false;
-  let done = false;       // every mission finished
-
-  function current() {
-    return MISSIONS[index];
-  }
-  function currentObjective() {
-    const mission = current();
-    return mission ? mission.objectives[objective] : null;
-  }
-  function placeBeacon() {
-    const obj = currentObjective();
-    if (obj && (obj.type === 'goto' || obj.type === 'collect')) {
-      beacon.position.set(obj.x, 0, obj.z);
-      beacon.visible = true;
-    } else {
-      beacon.visible = false;
-    }
-  }
-  function spawnCrates() {
-    for (const mesh of crateMeshes) scene.remove(mesh);
-    crateMeshes.length = 0;
-    const mission = current();
-    if (!mission) return;
-    for (const obj of mission.objectives) {
-      if (obj.type !== 'collect') continue;
-      const mesh = new THREE.Mesh(crateGeo, crateMat);
-      mesh.position.set(obj.x, 0.9, obj.z);
-      scene.add(mesh);
-      crateMeshes.push(mesh);
-    }
-  }
-
-  function start(indexValue) {
-    index = indexValue;
-    objective = 0;
-    active = true;
-    done = false;
-    const obj = currentObjective();
-    timer = obj && obj.timer ? obj.timer : 0;
-    spawnCrates();
-    placeBeacon();
-  }
-
-  function startNext() {
-    if (index + 1 >= MISSIONS.length) {
-      active = false;
-      done = true;
-      beacon.visible = false;
-      return null;
-    }
-    start(index + 1);
-    return current();
-  }
-
-  // flags: { stoleCar, playerX, playerZ, inCar }
-  // Returns: 'objective' | 'complete' | 'failed' | null
-  function update(dt, flags) {
-    if (!active) return null;
-    const obj = currentObjective();
-    if (!obj) return null;
-    if (timer > 0) {
-      timer -= dt;
-      if (timer <= 0) return 'failed';
-    }
-    if (obj.type === 'steal') {
-      if (flags.stoleCar) {
-        objective += 1;
-        const next = currentObjective();
-        timer = next && next.timer ? next.timer : 0;
-        placeBeacon();
-        return 'objective';
+  const state = {
+    index: 0,
+    step: 0,
+    timer: 0,
+    done: false,
+    allDone: false,
+    beacon,
+    crate,
+    get mission() {
+      return MISSIONS[this.index];
+    },
+    get stepDef() {
+      return this.mission ? this.mission.steps[this.step] : null;
+    },
+    get objectiveText() {
+      const s = this.stepDef;
+      if (this.allDone) return 'All jobs done — Solmar Bay is yours.';
+      if (!s) return '';
+      if (s.kind === 'timed' && this.timer > 0) {
+        return `${s.text} — ${Math.ceil(this.timer)}s left`;
       }
-      return null;
-    }
-    if (obj.type === 'goto' || obj.type === 'collect') {
-      const dist = Math.hypot(flags.playerX - obj.x, flags.playerZ - obj.z);
-      if (dist <= obj.radius) {
-        if (obj.type === 'collect') {
-          const mesh = crateMeshes.find((m) => Math.hypot(m.position.x - obj.x, m.position.z - obj.z) < 0.5);
-          if (mesh) scene.remove(mesh);
+      return s.text;
+    },
+    get target() {
+      const s = this.stepDef;
+      return s && s.target ? { x: s.target[0], z: s.target[1] } : null;
+    },
+    start(index) {
+      this.index = index;
+      this.step = 0;
+      this.timer = 0;
+      this.done = false;
+      this.allDone = index >= MISSIONS.length;
+      this.placeMarkers();
+    },
+    placeMarkers() {
+      const s = this.stepDef;
+      const t = this.target;
+      beacon.visible = !!t;
+      if (t) beacon.position.set(t.x, 0, t.z);
+      const showCrate = s && s.kind === 'collect';
+      crate.visible = !!showCrate;
+      if (showCrate && t) crate.position.set(t.x, 0, t.z);
+      if (s && s.kind === 'timed') this.timer = s.seconds;
+    },
+    advance() {
+      this.step++;
+      if (this.step >= this.mission.steps.length) {
+        this.done = true;
+      } else {
+        this.placeMarkers();
+      }
+    },
+    completeJob(cash) {
+      const reward = this.mission.reward;
+      this.index++;
+      this.step = 0;
+      this.timer = 0;
+      this.done = false;
+      if (this.index >= MISSIONS.length) {
+        this.allDone = true;
+        beacon.visible = false;
+        crate.visible = false;
+      } else {
+        this.placeMarkers();
+      }
+      return cash + reward;
+    },
+    update(dt, player) {
+      if (this.allDone || !this.stepDef) return null;
+      const s = this.stepDef;
+      if (s.kind === 'timed') {
+        this.timer -= dt;
+        if (this.timer <= 0) {
+          // Out of time: the job fails and restarts at its first step.
+          this.step = 0;
+          this.placeMarkers();
+          return 'failed';
         }
-        objective += 1;
-        const next = currentObjective();
-        timer = next && next.timer ? next.timer : 0;
-        if (!next) return 'complete';
-        placeBeacon();
-        return 'objective';
       }
-      return null;
-    }
-    if (obj.type === 'evade') {
-      if (flags.wanted === 0) {
-        objective += 1;
-        if (!currentObjective()) return 'complete';
-        placeBeacon();
-        return 'objective';
+      if (s.kind === 'enter-car') {
+        if (player.inCar) {
+          this.advance();
+          return this.done ? 'job-done' : 'step';
+        }
+        return null;
       }
+      const t = this.target;
+      if (!t) return null;
+      const dist = Math.hypot(player.x - t.x, player.z - t.z);
+      const radius = s.radius || 8;
+      if (s.kind === 'pickup') {
+        if (dist < radius) {
+          // Lena hops in after a short wait.
+          this.timer += dt;
+          if (this.timer > 2.5) {
+            this.advance();
+            return this.done ? 'job-done' : 'step';
+          }
+        } else {
+          this.timer = 0;
+        }
+        return null;
+      }
+      if (s.kind === 'collect') {
+        if (dist < radius && player.nearCrate) {
+          this.advance();
+          return this.done ? 'job-done' : 'step';
+        }
+        return null;
+      }
+      if (dist < radius) {
+        this.advance();
+        return this.done ? 'job-done' : 'step';
+      }
+      // Spin the golden crate so it catches the eye.
+      if (crate.visible) crate.rotation.y += dt * 1.2;
       return null;
-    }
-    return null;
-  }
-
-  function updateVisual(dt, time) {
-    if (beacon.visible) {
-      const s = 1 + Math.sin(time * 3) * 0.08;
-      ring.scale.set(s, s, 1);
-      pillar.material.opacity = 0.28 + Math.sin(time * 3) * 0.08;
-    }
-    for (const mesh of crateMeshes) mesh.rotation.y += dt * 0.8;
-  }
-
-  return {
-    get index() { return index; },
-    get active() { return active; },
-    get done() { return done; },
-    get timer() { return timer; },
-    get objectiveIndex() { return objective; },
-    current,
-    currentObjective,
-    start,
-    startNext,
-    update,
-    updateVisual,
-    objectiveTarget() {
-      const obj = currentObjective();
-      return obj && (obj.type === 'goto' || obj.type === 'collect') ? { x: obj.x, z: obj.z } : null;
     },
   };
+  return state;
 }

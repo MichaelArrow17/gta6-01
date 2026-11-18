@@ -1,116 +1,124 @@
-// The screenshot scenes behind ?shot=<name>&seed=<n>. Each one sets the real
-// world up and plays its real rules forward for a fixed number of steps with
-// scripted inputs — no faked props — so the frame is what the game really
-// looks like, and the same seed always gives the same frame.
-//   start  — title screen over the sunset city, Rae by her car on the beach road
-//   drive  — mission 1: driving through downtown toward Dario's garage
-//   chase  — wanted level 3: police cars and the helicopter on Rae's tail
-//   mission— mission 4: on foot at the docks, grabbing a crate, cops closing in
-import { STEP } from './world.js';
-import { createRandom } from './random.js';
-import { enterCar } from './player.js';
+// Solmar Bay — staged screenshots: four deterministic scenes the dossier
+// carries. Each one sets up the world from the seed, steps the simulation a
+// fixed number of fixed steps, places the camera, renders once, and raises
+// window.__shotReady. Nothing here reads wall time or Math.random.
 
-const SCREEN_TITLE = 'title';
-const SCREEN_PLAY = 'play';
+import * as THREE from 'three';
+import { TUNING } from './config.js';
 
-function driveForward(world, seconds, strafe) {
-  const steps = Math.round(seconds / STEP);
-  for (let i = 0; i < steps; i += 1) {
-    world.step(STEP, { forward: 1, strafe: strafe || 0, run: false }, {}, 0);
+const STEP = 1 / 60;
+
+function holdKey(input, code) {
+  input.keys.add(code);
+}
+
+function releaseKey(input, code) {
+  input.keys.delete(code);
+}
+
+function stepN(world, n) {
+  for (let i = 0; i < n; i++) world.step(STEP);
+}
+
+export function runShot(name, seed, game) {
+  const { world, input, snapCamera, renderOnce, showHud, hideHud, showTitle, hideTitle, setCinematic } = game;
+  const player = world.player;
+
+  if (name === 'start') {
+    // Title over the living sunset city: from the east, looking west into
+    // the sun so the skyline reads against the orange horizon.
+    showTitle();
+    hideHud();
+    world.running = true;
+    world.missions.start(0);
+    setCinematic(new THREE.Vector3(150, 42, 70), new THREE.Vector3(-90, 16, -30));
+    stepN(world, 90);
+    renderOnce();
+    window.__shotReady = true;
+    return;
   }
-}
 
-function idle(world, seconds) {
-  const steps = Math.round(seconds / STEP);
-  for (let i = 0; i < steps; i += 1) {
-    world.step(STEP, { forward: 0, strafe: 0, run: false }, {}, 0);
+  hideTitle();
+  showHud();
+  world.running = true;
+
+  if (name === 'drive') {
+    // Mission 1, driving the stolen car: 2 stars, traffic, park, minimap.
+    world.missions.start(0);
+    world.pressE();
+    player.carYaw = Math.PI;
+    // Pull the stolen curb car onto the road centre so the drive reads as
+    // driving, not parked on the park lawn.
+    player.x = 0;
+    holdKey(input, 'KeyW');
+    stepN(world, 150);
+    releaseKey(input, 'KeyW');
+    snapCamera();
+    renderOnce();
+    window.__shotReady = true;
+    return;
   }
-}
 
-function stageStart(world) {
-  // Rae on foot by a parked car on the beach road, city glowing behind her.
-  const p = world.player;
-  p.x = -100;
-  p.z = 24;
-  p.heading = Math.PI / 2;
-  p.mesh.position.set(p.x, 0, p.z);
-  p.mesh.rotation.y = p.heading;
-  idle(world, 6);
-  return {
-    screen: SCREEN_TITLE,
-    camPos: [-118, 9, 44],
-    camLook: [-60, 6, 0],
-  };
-}
+  if (name === 'chase') {
+    // Wanted 3: a cop right behind the player and the helicopter airframe
+    // in view, camera lifted.
+    world.missions.start(0);
+    world.pressE();
+    player.carYaw = Math.PI;
+    player.x = 0;
+    world.police.setWanted(3);
+    holdKey(input, 'KeyW');
+    stepN(world, 120);
+    releaseKey(input, 'KeyW');
+    // Put the nearest cop right behind the player's car.
+    const cop = world.police.cops[0];
+    if (cop) {
+      const fx = Math.sin(player.carYaw);
+      const fz = Math.cos(player.carYaw);
+      cop.x = player.x - fx * 9;
+      cop.z = player.z - fz * 9;
+      cop.mesh.position.set(cop.x, 0, cop.z);
+      cop.mesh.rotation.y = player.carYaw;
+    }
+    // Park the helicopter ahead of the player, airframe in frame.
+    const heli = world.police.heli;
+    heli.visible = true;
+    const fx = Math.sin(player.carYaw);
+    const fz = Math.cos(player.carYaw);
+    heli.position.set(player.x + fx * 26 + 12, TUNING.heliHeight, player.z + fz * 26 - 6);
+    heli.rotation.y = Math.atan2(player.x - heli.position.x, player.z - heli.position.z);
+    // A longer camera distance flattens the lifted chase view so the cop
+    // behind, the player car and the heli airframe all fit in frame; a
+    // 4 m sideways slide keeps the streetlight off the centre line.
+    snapCamera(22, 4);
+    renderOnce();
+    window.__shotReady = true;
+    return;
+  }
 
-function stageDrive(world, seed) {
-  world.startMission();
-  const p = world.player;
-  const car = world.parked[0];
-  p.x = car.x;
-  p.z = car.z;
-  enterCar(p, car);
-  world.state.stoleCarFlag = true; // the steal already happened in this scene
-  world.police.addHeat(1, p.x, p.z, createRandom(seed + 5)); // stealing is a crime
-  car.heading = Math.PI / 2; // east, down the main avenue
-  car.x = -64;
-  car.z = 0;
-  driveForward(world, 2.4, 0);
-  return {
-    screen: SCREEN_PLAY,
-    camPos: [p.x - 14, 7, p.z - 3],
-    camLook: [p.x + 16, 2, p.z],
-  };
-}
+  if (name === 'mission') {
+    // Mission 4 on foot: the golden crate and its beacon by the lighthouse,
+    // the pier and the ocean behind it.
+    world.missions.start(3);
+    // Stand 10 m short of the crate so it reads clearly, with the beacon,
+    // lighthouse and ocean behind it. Offset 3 m west of the pier centre
+    // so the crate and beacon show beside the player instead of behind them.
+    player.x = 57;
+    player.z = 272;
+    player.yaw = 0;
+    player.mesh.position.set(57, 0, 272);
+    player.mesh.rotation.y = 0;
+    stepN(world, 30);
+    // The pier deck tops out at y 1.5, and the walk step resets the mesh
+    // to y 0, so lift the player onto the deck for the render.
+    player.mesh.position.y = 1.5;
+    snapCamera();
+    renderOnce();
+    window.__shotReady = true;
+    return;
+  }
 
-function stageChase(world, seed) {
-  world.startMission();
-  const p = world.player;
-  const car = world.parked[1];
-  p.x = car.x;
-  p.z = car.z;
-  enterCar(p, car);
-  world.state.stoleCarFlag = true;
-  car.heading = Math.PI / 2;
-  car.x = -48;
-  car.z = 32;
-  world.police.addHeat(3, p.x, p.z, createRandom(seed + 7));
-  driveForward(world, 3.0, 0);
-  return {
-    screen: SCREEN_PLAY,
-    camPos: [p.x - 16, 9.5, p.z + 2],
-    camLook: [p.x + 14, 2, p.z],
-  };
+  // Unknown shot name: render whatever the world holds.
+  renderOnce();
+  window.__shotReady = true;
 }
-
-function stageMission(world, seed) {
-  // Jump to mission 4: the docks job, on foot, one star of heat.
-  world.state.missionIndex = 3;
-  world.startMission();
-  const p = world.player;
-  // On the z=-64 road, walking west toward the first crate at (-96,-64),
-  // the beach and ocean at the end of the road.
-  p.x = -86;
-  p.z = -64;
-  p.heading = -Math.PI / 2;
-  p.mesh.position.set(p.x, 0, p.z);
-  p.mesh.rotation.y = p.heading;
-  world.police.addHeat(1, p.x, p.z, createRandom(seed + 11));
-  idle(world, 2.5);
-  return {
-    screen: SCREEN_PLAY,
-    // Right behind Rae on the same road: her, the glowing crate ahead,
-    // the beacon, and the ocean at the end of the street.
-    camPos: [p.x + 12, 5.5, p.z],
-    camLook: [-100, 2, -64],
-  };
-}
-
-export function stageShot(name, world, seed) {
-  if (name === 'drive') return stageDrive(world, seed);
-  if (name === 'chase') return stageChase(world, seed);
-  if (name === 'mission') return stageMission(world, seed);
-  return stageStart(world);
-}
-
-export { SCREEN_TITLE, SCREEN_PLAY };

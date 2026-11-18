@@ -1,107 +1,97 @@
-// Pedestrians: the people of Solmar Bay. They stroll the sidewalks, cross at
-// corners, and run away when a car barrels at them or a fist flies. Each one
-// is a small figure — torso, head, legs that swing as they walk.
+// Solmar Bay — pedestrians: 26 walkers on the sidewalks who stroll between
+// corners and flee when the player threatens them.
+
 import * as THREE from 'three';
-import { range } from './random.js';
+import { CITY, TUNING } from './config.js';
 
-const SHIRTS = [0xe8e8e8, 0xd94f3d, 0x3d7ad9, 0xe8c84a, 0x7a9e7e, 0x8a5fc0, 0xe08a4a, 0x4a4a4a];
-const PANTS = [0x2a2f36, 0x3d5a80, 0x6b4a2a, 0x4a4a4a];
+const SHIRTS = [0xc05040, 0x4060c0, 0x50a060, 0xd0a030, 0x8040a0, 0xd0d0d0, 0x303840, 0xe07840];
 
-export function createPedestrianMesh(shirt, pants) {
+export function makePersonMesh(rng) {
   const group = new THREE.Group();
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.72, 0.34), new THREE.MeshLambertMaterial({ color: shirt }));
-  torso.position.y = 1.08;
+  const shirt = new THREE.MeshLambertMaterial({ color: rng.pick(SHIRTS) });
+  const skin = new THREE.MeshLambertMaterial({ color: rng.pick([0xe0b088, 0xc08860, 0x8a5a40, 0xf0c8a0]) });
+  const pants = new THREE.MeshLambertMaterial({ color: 0x2a3038 });
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.75, 0.32), shirt);
+  torso.position.y = 1.15;
   group.add(torso);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 8), new THREE.MeshLambertMaterial({ color: 0xd9a986 }));
-  head.position.y = 1.66;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 8), skin);
+  head.position.y = 1.72;
   group.add(head);
-  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.25, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshLambertMaterial({ color: 0x2a2018 }));
-  hair.position.y = 1.7;
-  group.add(hair);
-  const legMat = new THREE.MeshLambertMaterial({ color: pants });
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.72, 0.26), legMat);
-  legL.position.set(-0.16, 0.36, 0);
-  const legR = legL.clone();
-  legR.position.x = 0.16;
-  group.add(legL);
-  group.add(legR);
-  group.userData.legs = [legL, legR];
+  for (const sx of [-0.14, 0.14]) {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.75, 0.22), pants);
+    leg.position.set(sx, 0.38, 0);
+    group.add(leg);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.65, 0.16), shirt);
+    arm.position.set(sx * 2.4, 1.15, 0);
+    group.add(arm);
+  }
+  group.userData.isPerson = true;
   return group;
 }
 
-export function createPedestrians(scene, random, count) {
-  const peds = [];
-  for (let i = 0; i < count; i += 1) {
-    const mesh = createPedestrianMesh(
-      SHIRTS[Math.floor(random() * SHIRTS.length)],
-      PANTS[Math.floor(random() * PANTS.length)],
-    );
-    scene.add(mesh);
-    // Start on a sidewalk: just off a road line.
-    const road = Math.floor(range(random, -3, 3)) * 32;
-    const along = range(random, -96, 96);
-    const vertical = random() < 0.5;
-    peds.push({
-      mesh,
-      x: vertical ? road + 8 : along,
-      z: vertical ? along : road + 8,
-      heading: range(random, 0, Math.PI * 2),
-      speed: range(random, 1.0, 1.8),
-      walkPhase: range(random, 0, Math.PI * 2),
-      state: 'walk',
-      fleeTimer: 0,
-      health: 30,
-      vertical,
-      dir: random() < 0.5 ? 1 : -1,
-    });
-  }
-  return peds;
+function sidewalkPoint(rng) {
+  // A point on a sidewalk: just off a road centreline.
+  const road = rng.pick(CITY.roadAt);
+  const along = rng.range(-150, 150);
+  if (rng.chance(0.5)) return { x: road + 7, z: along };
+  return { x: along, z: road + 7 };
 }
 
-export function updatePedestrians(peds, dt, danger) {
-  for (const ped of peds) {
-    if (ped.health <= 0) {
-      // Down: lying flat, fading back up after a while is handled by world.
-      ped.mesh.rotation.x = -Math.PI / 2;
-      ped.mesh.position.y = 0.3;
-      continue;
-    }
-    ped.mesh.rotation.x = 0;
-    const dx = danger.x - ped.x;
-    const dz = danger.z - ped.z;
-    const dist = Math.hypot(dx, dz);
-    if (danger.active && dist < 9) {
-      ped.state = 'flee';
-      ped.fleeTimer = 2.5;
-    } else if (ped.fleeTimer > 0) {
-      ped.fleeTimer -= dt;
-      if (ped.fleeTimer <= 0) ped.state = 'walk';
-    }
-    if (ped.state === 'flee') {
-      const away = Math.atan2(-dx, -dz);
-      ped.heading = away;
-      ped.x += Math.sin(away) * 4.5 * dt;
-      ped.z += Math.cos(away) * 4.5 * dt;
-    } else {
-      // Stroll along the sidewalk, turning around at the map edge.
-      const step = ped.speed * ped.dir * dt;
-      if (ped.vertical) {
-        ped.z += step;
-        ped.heading = ped.dir > 0 ? 0 : Math.PI;
-        if (ped.z > 100 || ped.z < -100) ped.dir *= -1;
-      } else {
-        ped.x += step;
-        ped.heading = ped.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
-        if (ped.x > 100 || ped.x < -100) ped.dir *= -1;
-      }
-    }
-    ped.x = Math.max(-108, Math.min(108, ped.x));
-    ped.z = Math.max(-108, Math.min(108, ped.z));
-    ped.walkPhase += dt * (ped.state === 'flee' ? 14 : 7);
-    const swing = Math.sin(ped.walkPhase) * 0.5;
-    ped.mesh.userData.legs[0].rotation.x = swing;
-    ped.mesh.userData.legs[1].rotation.x = -swing;
-    ped.mesh.position.set(ped.x, 0, ped.z);
-    ped.mesh.rotation.y = ped.heading;
+export function createCrowd(scene, rng) {
+  const peds = [];
+  for (let i = 0; i < TUNING.pedCount; i++) {
+    const mesh = makePersonMesh(rng);
+    const start = sidewalkPoint(rng);
+    mesh.position.set(start.x, 0, start.z);
+    scene.add(mesh);
+    peds.push({
+      mesh,
+      x: start.x,
+      z: start.z,
+      target: sidewalkPoint(rng),
+      speed: TUNING.pedSpeed * rng.range(0.8, 1.3),
+      fleeing: false,
+      health: 100,
+    });
   }
+  return {
+    peds,
+    update(dt, threat) {
+      for (const ped of peds) {
+        if (ped.health <= 0) {
+          ped.mesh.visible = false;
+          continue;
+        }
+        const dx = threat.x - ped.x;
+        const dz = threat.z - ped.z;
+        const dist = Math.hypot(dx, dz);
+        let tx = ped.target.x;
+        let tz = ped.target.z;
+        let speed = ped.speed;
+        if (threat.active && dist < 14) {
+          // Flee directly away from the threat.
+          ped.fleeing = true;
+          tx = ped.x - dx / (dist || 1) * 20;
+          tz = ped.z - dz / (dist || 1) * 20;
+          speed = TUNING.pedFleeSpeed;
+        } else {
+          ped.fleeing = false;
+        }
+        const mx = tx - ped.x;
+        const mz = tz - ped.z;
+        const mlen = Math.hypot(mx, mz);
+        if (mlen < 1.2) {
+          if (!ped.fleeing) ped.target = sidewalkPoint(rng);
+          continue;
+        }
+        const step = Math.min(mlen, speed * dt);
+        ped.x += (mx / mlen) * step;
+        ped.z += (mz / mlen) * step;
+        ped.mesh.position.set(ped.x, 0, ped.z);
+        ped.mesh.rotation.y = Math.atan2(mx, mz);
+        // Simple walk bob.
+        ped.mesh.position.y = Math.abs(Math.sin((ped.x + ped.z) * 2.2)) * 0.05;
+      }
+    },
+  };
 }
